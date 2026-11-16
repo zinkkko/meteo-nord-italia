@@ -1,10 +1,12 @@
 name: Aggiorna e pubblica
 
-# Ogni 10 minuti scarica i dati delle stazioni (e, ogni 3 ore, il modello),
-# poi ripubblica il sito su GitHub Pages.
+# Scarica i dati delle stazioni (e, ogni 3 ore, il modello) e ripubblica il sito su GitHub Pages.
+# Gli orari programmati di GitHub sono inaffidabili (anche ore di ritardo), quindi ogni esecuzione,
+# una volta finita, aspetta qualche minuto e fa partire la successiva: un aggiornamento ogni ~10 minuti.
+# L'orario programmato resta solo come riavvio di sicurezza se la catena si interrompe.
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "17 * * * *"
   push:
     branches: [main]
   workflow_dispatch:
@@ -13,6 +15,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  actions: write
 
 concurrency:
   group: pages
@@ -21,7 +24,7 @@ concurrency:
 jobs:
   pubblica:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 20
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
@@ -42,3 +45,16 @@ jobs:
           path: web
       - id: deploy
         uses: actions/deploy-pages@v4
+      - name: Fa ripartire il prossimo aggiornamento
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sleep 420
+          # se un'altra esecuzione e' gia' in coda o in corso, la catena continua da quella
+          altre=$(gh run list -R "$GITHUB_REPOSITORY" --workflow pubblica.yml --limit 20 --json databaseId,status \
+            --jq "[.[] | select(.status != \"completed\" and .databaseId != $GITHUB_RUN_ID)] | length")
+          echo "Altre esecuzioni attive: $altre"
+          if [ "$altre" = "0" ]; then
+            gh workflow run pubblica.yml -R "$GITHUB_REPOSITORY" --ref main
+          fi

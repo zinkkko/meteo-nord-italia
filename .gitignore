@@ -3,3 +3,4 @@ __pycache__/
 .claude/
 web/data/stations.json
 web/data/grid.json
+icone-proposte/
