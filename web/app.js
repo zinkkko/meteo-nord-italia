@@ -256,16 +256,25 @@ function computeCorrections() {
   const fresh = S.stations.filter((s) => now - new Date(s.time).getTime() < 75 * 60000);
   const tb = F.dem ? tempBase(ti) : null, T = f32('temperature_2m', ti), RH = f32('relative_humidity_2m', ti), P = f32('pressure_msl', ti);
   const res = { t: [], rh: [], p: [] };
+  // gli amatoriali (Sensor.Community, Netatmo) sono migliaia: in ogni cella di 0,1 gradi diventano un solo
+  // punto (la media), che pesa al massimo meta' di una stazione ufficiale
+  const am = { t: new Map(), rh: new Map(), p: new Map() };
+  const put = (key, s, r) => {
+    if (s.src !== 'sc' && s.src !== 'nt') return res[key].push([s.lon, s.lat, r, 1]);
+    const k = Math.floor(s.lon * 10) * 10000 + Math.floor(s.lat * 10), c = am[key].get(k);
+    if (c) { c[0] += s.lon; c[1] += s.lat; c[2] += r; c[3]++; } else am[key].set(k, [s.lon, s.lat, r, 1]);
+  };
   for (const s of fresh) {
-    const wt = s.src === 'sc' || s.src === 'nt' ? 0.35 : 1; // gli amatoriali contano meno delle stazioni ufficiali
     if (s.t != null) {
       const alt = s.alt != null ? s.alt : S.dem ? pointBil(S.dem.z, S.dem, s.lon, s.lat) : 0;
       const m = tb ? pointBil(tb.T0, g, s.lon, s.lat) + tb.L * alt : pointBil(T, g, s.lon, s.lat);
-      if (m === m && Math.abs(s.t - m) < 9) res.t.push([s.lon, s.lat, s.t - m, wt]);
+      if (m === m && Math.abs(s.t - m) < 9) { put('t', s, s.t - m); C.n++; }
     }
-    if (s.rh != null) { const m = pointBil(RH, g, s.lon, s.lat); if (m === m && Math.abs(s.rh - m) < 50) res.rh.push([s.lon, s.lat, s.rh - m, wt]); }
-    if (s.p != null) { const m = pointBil(P, g, s.lon, s.lat); if (m === m && Math.abs(s.p - m) < 8) res.p.push([s.lon, s.lat, s.p - m, wt]); }
+    if (s.rh != null) { const m = pointBil(RH, g, s.lon, s.lat); if (m === m && Math.abs(s.rh - m) < 50) put('rh', s, s.rh - m); }
+    if (s.p != null) { const m = pointBil(P, g, s.lon, s.lat); if (m === m && Math.abs(s.p - m) < 8) put('p', s, s.p - m); }
   }
+  for (const key of ['t', 'rh', 'p'])
+    for (const [lon, lat, r, n] of am[key].values()) res[key].push([lon / n, lat / n, r / n, n >= 3 ? 0.5 : 0.35]);
   const idx = makeIdx(cg), sig = 0.2, cut = 0.65, kx = 0.7;
   for (const key of ['t', 'rh', 'p']) {
     const pts = res[key];
@@ -283,7 +292,6 @@ function computeCorrections() {
     C[key] = new Float32Array(F.W * F.H);
     fill(C[key], num, idx);
   }
-  C.n = res.t.length;
 }
 
 /* ---------- numeri del modello sulla mappa ---------- */
@@ -319,6 +327,7 @@ function stationValue(s, l) {
   return v;
 }
 
+const AM_ZOOM = 8.5; // da questo zoom si vedono anche le stazioni amatoriali
 function updateStations() {
   const src = map.getSource('st');
   if (!src) return;
@@ -330,7 +339,8 @@ function updateStations() {
       feats.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [s.lon, s.lat] },
         properties: { id: s.id, label: l.id === 'temp' || l.id === 'dew' ? fmt(v, 1) + '°' : fmt(v, l.id === 'rain' ? 1 : 0) + (l.id === 'cloud' ? '%' : ''),
           color: colorCss(l, v, true), rot: ((s.wd ?? 0) + 180) % 360, hasDir: s.wd != null && (s.ws ?? 1) > 0.5,
-          pri: s.src === 'metar' ? 0 : s.src === 'sc' || s.src === 'nt' || s.src === 'wind' ? 2 : 1, sel: S.sel === s.id } });
+          pri: s.src === 'metar' ? 0 : s.src === 'sc' || s.src === 'nt' || s.src === 'wind' ? 2 : 1, sel: S.sel === s.id,
+          am: (s.src === 'sc' || s.src === 'nt') && S.sel !== s.id } });
     }
   }
   src.setData({ type: 'FeatureCollection', features: feats });
@@ -355,13 +365,16 @@ function setupStations() {
   map.addLayer({ id: 'st-dot', type: 'circle', source: 'st', paint: {
     'circle-radius': ['interpolate', ['linear'], ['zoom'], 5, ['case', ['get', 'sel'], 6, 2.4], 8, ['case', ['get', 'sel'], 9, 4.5], 11, ['case', ['get', 'sel'], 11, 7]],
     'circle-color': ['get', 'color'], 'circle-stroke-color': DARK ? 'rgba(0,0,0,.6)' : '#fff',
-    'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 5, 0.6, 9, 1.5] } });
+    'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 5, 0.6, 9, 1.5],
+    // le stazioni amatoriali sono migliaia: compaiono solo avvicinandosi (AM_ZOOM)
+    'circle-opacity': ['interpolate', ['linear'], ['zoom'], AM_ZOOM - 0.8, ['case', ['get', 'am'], 0, 1], AM_ZOOM, 1],
+    'circle-stroke-opacity': ['interpolate', ['linear'], ['zoom'], AM_ZOOM - 0.8, ['case', ['get', 'am'], 0, 1], AM_ZOOM, 1] } });
   map.addLayer({ id: 'st-arrow', type: 'symbol', source: 'st', filter: ['get', 'hasDir'], layout: {
     'icon-image': 'arrow', 'icon-rotate': ['get', 'rot'], 'icon-size': ['interpolate', ['linear'], ['zoom'], 5, 0.5, 9, 0.9],
     'icon-allow-overlap': false, 'icon-padding': 1, 'icon-rotation-alignment': 'map', visibility: 'none' },
     paint: { 'icon-color': ink, 'icon-halo-color': halo, 'icon-halo-width': 1.5 } });
   map.addLayer({ id: 'st-label', type: 'symbol', source: 'st', layout: {
-    'text-field': ['get', 'label'], 'text-font': font, 'text-size': ['interpolate', ['linear'], ['zoom'], 5, 10.5, 9, 13],
+    'text-field': ['step', ['zoom'], ['case', ['get', 'am'], '', ['get', 'label']], AM_ZOOM, ['get', 'label']], 'text-font': font, 'text-size': ['interpolate', ['linear'], ['zoom'], 5, 10.5, 9, 13],
     'text-offset': [0, -0.95], 'text-anchor': 'bottom', 'text-padding': 3, 'symbol-sort-key': ['get', 'pri'] },
     paint: { 'text-color': ink, 'text-halo-color': halo, 'text-halo-width': 1.6 } });
   for (const id of ['st-dot', 'st-label']) {
@@ -711,7 +724,8 @@ function probe(lngLat) {
 }
 map.on('click', (e) => {
   if (window.sunMapClick && window.sunMapClick(e.lngLat)) return; // pannello tramonto aperto: sposta il punto
-  const p = e.point, r = MOBILE ? 12 : 7, hits = map.getLayer('st-dot') ? map.queryRenderedFeatures([[p.x - r, p.y - r], [p.x + r, p.y + r]], { layers: ['st-dot', 'st-label'] }) : [];
+  const p = e.point, r = MOBILE ? 12 : 7, hits = map.getLayer('st-dot') ? map.queryRenderedFeatures([[p.x - r, p.y - r], [p.x + r, p.y + r]], { layers: ['st-dot', 'st-label'] })
+    .filter((h) => !h.properties.am || map.getZoom() >= AM_ZOOM - 0.4) : []; // amatoriali ancora invisibili: non si cliccano
   probe(e.lngLat);
   if (hits.length) {
     const s = S.stations.find((x) => x.id === hits[0].properties.id);

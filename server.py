@@ -612,6 +612,7 @@ def src_amatoriali():
 NT_DIR = os.path.join(ROOT, ".netatmo")
 NT_FILE = os.path.join(NT_DIR, "token.bin")
 NT_COLS, NT_ROWS = 8, 5  # riquadri dell'area, una richiesta ciascuno (limite Netatmo: 500 all'ora)
+NT_GAP = 5.0  # secondi tra due richieste: un'app con un solo utente ne ha 2 ogni 10 secondi
 NT_CELL = 0.02  # al massimo una stazione Netatmo per cella di ~2 km
 NT_LOCK = threading.Lock()
 
@@ -698,8 +699,19 @@ def src_netatmo():
         except Exception as e:
             return e
 
-    with ThreadPoolExecutor(4) as ex:
-        res = list(ex.map(one, boxes))
+    res, todo, t_next, retried, first = [None] * len(boxes), list(range(len(boxes))), time.time(), 0, set()
+    for _ in range(2):  # i riquadri falliti si riprovano una volta, alla fine
+        failed = []
+        for k in todo:
+            time.sleep(max(0.0, t_next - time.time()))
+            t_next = time.time() + NT_GAP
+            res[k] = one(boxes[k])
+            if isinstance(res[k], Exception):
+                failed.append(k)
+                first.add(f"{type(res[k]).__name__}: {res[k]}"[:160])
+        todo, retried = failed, retried or len(failed)
+        if not todo:
+            break
     errs = [r for r in res if isinstance(r, Exception)]
     if len(errs) == len(res):
         raise errs[0]
@@ -733,8 +745,10 @@ def src_netatmo():
             s.update(t=vals.get("temperature"), rh=vals.get("humidity"), p=vals.get("pressure"))
             out[sid] = s  # una stazione sul bordo di due riquadri arriva due volte
     per_box = [len(r) for r in res if not isinstance(r, Exception)]
-    print(f"  [nt] {len(boxes)} riquadri ({len(errs)} con errore), al massimo {max(per_box)} stazioni "
-          f"in un riquadro, {len(out)} stazioni diverse", flush=True)
+    print(f"  [nt] {len(boxes)} riquadri ({retried} riprovati, {len(errs)} falliti), al massimo {max(per_box)} "
+          f"stazioni in un riquadro, {len(out)} stazioni diverse", flush=True)
+    for msg in sorted(first):
+        print(f"  [nt] errore: {msg}", flush=True)
     return list(out.values())
 
 
