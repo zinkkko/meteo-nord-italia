@@ -257,24 +257,25 @@ function computeCorrections() {
   const tb = F.dem ? tempBase(ti) : null, T = f32('temperature_2m', ti), RH = f32('relative_humidity_2m', ti), P = f32('pressure_msl', ti);
   const res = { t: [], rh: [], p: [] };
   for (const s of fresh) {
+    const wt = s.src === 'sc' ? 0.35 : 1; // i sensori amatoriali contano meno delle stazioni ufficiali
     if (s.t != null) {
       const alt = s.alt != null ? s.alt : S.dem ? pointBil(S.dem.z, S.dem, s.lon, s.lat) : 0;
       const m = tb ? pointBil(tb.T0, g, s.lon, s.lat) + tb.L * alt : pointBil(T, g, s.lon, s.lat);
-      if (m === m && Math.abs(s.t - m) < 9) res.t.push([s.lon, s.lat, s.t - m]);
+      if (m === m && Math.abs(s.t - m) < 9) res.t.push([s.lon, s.lat, s.t - m, wt]);
     }
-    if (s.rh != null) { const m = pointBil(RH, g, s.lon, s.lat); if (m === m && Math.abs(s.rh - m) < 50) res.rh.push([s.lon, s.lat, s.rh - m]); }
-    if (s.p != null) { const m = pointBil(P, g, s.lon, s.lat); if (m === m && Math.abs(s.p - m) < 8) res.p.push([s.lon, s.lat, s.p - m]); }
+    if (s.rh != null) { const m = pointBil(RH, g, s.lon, s.lat); if (m === m && Math.abs(s.rh - m) < 50) res.rh.push([s.lon, s.lat, s.rh - m, wt]); }
+    if (s.p != null) { const m = pointBil(P, g, s.lon, s.lat); if (m === m && Math.abs(s.p - m) < 8) res.p.push([s.lon, s.lat, s.p - m, wt]); }
   }
   const idx = makeIdx(cg), sig = 0.2, cut = 0.65, kx = 0.7;
   for (const key of ['t', 'rh', 'p']) {
     const pts = res[key];
     if (pts.length < 20) continue;
     const num = new Float32Array(cg.nx * cg.ny), den = new Float32Array(cg.nx * cg.ny);
-    for (const [lon, lat, r] of pts) {
+    for (const [lon, lat, r, wt] of pts) {
       const i0 = Math.max(0, Math.floor((lon - cut / kx - cg.lon0) / cg.step)), i1 = Math.min(cg.nx - 1, Math.ceil((lon + cut / kx - cg.lon0) / cg.step));
       const j0 = Math.max(0, Math.floor((lat - cut - cg.lat0) / cg.step)), j1 = Math.min(cg.ny - 1, Math.ceil((lat + cut - cg.lat0) / cg.step));
       for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
-        const dx = (cg.lon0 + i * cg.step - lon) * kx, dy = cg.lat0 + j * cg.step - lat, w = Math.exp(-(dx * dx + dy * dy) / (2 * sig * sig));
+        const dx = (cg.lon0 + i * cg.step - lon) * kx, dy = cg.lat0 + j * cg.step - lat, w = wt * Math.exp(-(dx * dx + dy * dy) / (2 * sig * sig));
         num[j * cg.nx + i] += w * r; den[j * cg.nx + i] += w;
       }
     }
@@ -329,7 +330,7 @@ function updateStations() {
       feats.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [s.lon, s.lat] },
         properties: { id: s.id, label: l.id === 'temp' || l.id === 'dew' ? fmt(v, 1) + '°' : fmt(v, l.id === 'rain' ? 1 : 0) + (l.id === 'cloud' ? '%' : ''),
           color: colorCss(l, v, true), rot: ((s.wd ?? 0) + 180) % 360, hasDir: s.wd != null && (s.ws ?? 1) > 0.5,
-          pri: s.src === 'metar' ? 0 : 1, sel: S.sel === s.id } });
+          pri: s.src === 'metar' ? 0 : s.src === 'sc' || s.src === 'wind' ? 2 : 1, sel: S.sel === s.id } });
     }
   }
   src.setData({ type: 'FeatureCollection', features: feats });
@@ -597,6 +598,7 @@ function snowType(h, k) {
 
 let panelReq = 0;
 async function openPanel({ station, lat, lon, name }) {
+  if (window.sunStop) sunStop();
   const req = ++panelReq;
   S.sel = station ? station.id : null;
   updateStations();
@@ -622,6 +624,8 @@ async function openPanel({ station, lat, lon, name }) {
   let unc = null;
   try { unc = ens ? ensembleUncertainty(ens) : null; } catch (e) { unc = null; }
   $('panelBody').innerHTML = head + renderPanel(s, fc, unc);
+  const sb = document.querySelector('.sun-open');
+  if (sb) sb.onclick = () => window.openSun({ lat, lon, name: s ? s.name : name || 'Punto sulla mappa' });
 }
 
 function renderPanel(s, fc, unc) {
@@ -688,7 +692,8 @@ function renderPanel(s, fc, unc) {
         <div class="range"><i style="left:${((a - lo) / span) * 100}%;right:${((hiT - b) / span) * 100}%;background:linear-gradient(90deg,${colorCss(LAYERS[0], a, true)},${colorCss(LAYERS[0], b, true)})"></i></div><span class="hi">${Math.round(b)}°</span>${chip(ud[day])}</div>`;
     });
     out += `<div class="sec"><h3>Prossimi 7 giorni</h3><div class="card">${dd}</div></div>`;
-    out += `<div class="sec"><div class="tiles"><div class="tile"><div class="k">Alba</div><div class="v">${d.sunrise[d0].slice(11, 16)}</div></div><div class="tile"><div class="k">Tramonto</div><div class="v">${d.sunset[d0].slice(11, 16)}</div></div></div></div>`;
+    out += `<div class="sec"><div class="tiles"><div class="tile"><div class="k">Alba</div><div class="v">${d.sunrise[d0].slice(11, 16)}</div></div><div class="tile"><div class="k">Tramonto</div><div class="v">${d.sunset[d0].slice(11, 16)}</div></div></div>
+      <button class="sun-open">🌄 Tramonto reale, con le montagne</button></div>`;
   } else out += '<div class="skel">Previsione non disponibile in questo momento.</div>';
   if (s && s.raw) out += `<div class="sec"><h3>Bollettino METAR</h3><div class="card raw">${esc(s.raw)}</div></div>`;
   out += `<div class="note"><b>Incertezza:</b> percentuale dei 51 scenari alternativi del modello europeo ECMWF che si discostano da quello centrale (temperatura diversa di oltre 2 °C, oppure pioggia sì/no diversa). Più è alta, meno la previsione è affidabile${unc ? '' : ' — al momento non disponibile'}.<br><br>
@@ -696,7 +701,7 @@ function renderPanel(s, fc, unc) {
   return out;
 }
 
-function closePanel() { $('panel').hidden = true; S.sel = null; panelReq++; updateStations(); }
+function closePanel() { $('panel').hidden = true; S.sel = null; panelReq++; updateStations(); if (window.sunStop) sunStop(); }
 $('panelClose').onclick = closePanel;
 $('panelGrab').onclick = () => { $('panel').classList.toggle('mini'); if (TRIP.result && !$('panel').hidden) setTimeout(fitTrip, 300); };
 
@@ -705,6 +710,7 @@ function probe(lngLat) {
   $('probe').textContent = v == null ? '' : S.layer.cats ? (v < 0.5 ? 'niente neve' : SNOW_TYPES[Math.round(v)]) : `${fmt(v, S.layer.dec)} ${S.layer.unit}`;
 }
 map.on('click', (e) => {
+  if (window.sunMapClick && window.sunMapClick(e.lngLat)) return; // pannello tramonto aperto: sposta il punto
   const p = e.point, r = MOBILE ? 12 : 7, hits = map.getLayer('st-dot') ? map.queryRenderedFeatures([[p.x - r, p.y - r], [p.x + r, p.y + r]], { layers: ['st-dot', 'st-label'] }) : [];
   probe(e.lngLat);
   if (hits.length) {
@@ -757,7 +763,7 @@ function renderSources() {
   $('sources').innerHTML = '<h4>Reti di misura</h4>' + S.sources.map((s) =>
     `<div class="row"><span class="dot ${s.ok === false ? 'bad' : ''}"></span>${esc(s.name)}<b>${s.count}</b></div>`).join('') +
     `<label><input type="checkbox" id="stShow" ${S.showSt ? 'checked' : ''}> Mostra le stazioni sulla mappa</label>` +
-    '<p id="updInfo"></p><p>I numeri con il pallino sono misure delle stazioni (solo su «Adesso»); i numeri senza pallino e lo sfondo colorato sono il modello, corretto attorno alle stazioni con le misure dell’ultima ora.</p>';
+    '<p id="updInfo"></p><p>I numeri con il pallino sono misure delle stazioni (solo su «Adesso»); i numeri senza pallino e lo sfondo colorato sono il modello, corretto attorno alle stazioni con le misure dell’ultima ora.</p><p>I sensori amatoriali sono confrontati con le stazioni ufficiali vicine (alla stessa quota): quelli troppo diversi vengono scartati e gli altri pesano un terzo nella correzione. Se due reti misurano nello stesso punto si tiene la stazione ufficiale.</p>';
   $('stShow').onchange = (e) => { S.showSt = e.target.checked; $('stToggle').classList.toggle('on', S.showSt); updateStations(); };
   showUpdated();
 }
@@ -1097,10 +1103,12 @@ function renderTrip() {
   };
 }
 function openTrip() {
+  if (window.sunStop) sunStop();
   panelReq++; S.sel = null; updateStations();
   $('panel').hidden = false; renderTrip(); $('panelBody').scrollTop = 0;
 }
 $('tripBtn').onclick = openTrip;
+$('sunBtn').onclick = () => window.openSun();
 
 /* ---------- caricamento ---------- */
 const getData = (name) => fetch(`data/${name}.json?t=${Math.floor(Date.now() / 60000)}`).then((r) => { if (!r.ok) throw new Error(name + ' ' + r.status); return r.json(); });

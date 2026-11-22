@@ -464,6 +464,216 @@ def src_metar():
     return out
 
 
+def utc_from_isoz(txt):
+    return datetime.fromisoformat(txt.replace("Z", "+00:00")).astimezone(UTC)
+
+
+def eu_local_to_utc(dt):
+    """Ora locale dell'Europa centrale (con ora legale) -> UTC."""
+    y = dt.year
+    last_sun = lambda m: max(d for d in range(25, 32) if datetime(y, m, d).weekday() == 6)
+    start = datetime(y, 3, last_sun(3), 2)
+    end = datetime(y, 10, last_sun(10), 3)
+    off = 2 if start <= dt < end else 1
+    return (dt - timedelta(hours=off)).replace(tzinfo=UTC)
+
+
+def src_slf():
+    """SLF: stazioni IMIS delle Alpi svizzere (neve, vento e temperatura in quota)."""
+    base = "https://measurement-api.slf.ch/public/api/imis/"
+    meta = {x["code"]: x for x in get_json(base + "stations")}
+    last = {}
+    for r in get_json(base + "measurements", timeout=90):
+        c = r.get("station_code")
+        if c in meta and r.get("measure_date") and (c not in last or r["measure_date"] > last[c]["measure_date"]):
+            last[c] = r
+    out = []
+    for c, r in last.items():
+        m = meta[c]
+        lat, lon = num(m.get("lat")), num(m.get("lon"))
+        if not in_bbox(lat, lon):
+            continue
+        s = station("slf", c, m.get("label") or c, lat, lon, num(m.get("elevation")))
+        s["time"] = iso(utc_from_isoz(r["measure_date"]))
+        s.update(t=num(r.get("TA_30MIN_MEAN")), rh=num(r.get("RH_30MIN_MEAN")),
+                 ws=kmh(num(r.get("VW_30MIN_MEAN"))), wg=kmh(num(r.get("VW_30MIN_MAX"))),
+                 wd=num(r.get("DW_30MIN_MEAN")), snow=num(r.get("HS")))
+        out.append(s)
+    return out
+
+
+def src_tirol():
+    """Servizio valanghe del Tirolo (avalanche.report): stazioni di montagna del Tirolo austriaco."""
+    d = get_json("https://static.avalanche.report/weather_stations/stations.geojson")
+    out = []
+    for f in d.get("features", []):
+        p = f.get("properties") or {}
+        if not str(p.get("LWD-Region") or "").startswith("AT-07") or not p.get("date"):
+            continue  # Alto Adige e Trentino arrivano gia' dalle loro reti ufficiali
+        c = (f.get("geometry") or {}).get("coordinates") or []
+        if len(c) < 2:
+            continue
+        lon, lat = num(c[0]), num(c[1])
+        if not in_bbox(lat, lon):
+            continue
+        sid = p.get("LWD-Nummer") or p.get("plot") or f.get("id")
+        s = station("tir", sid, p.get("name") or sid, lat, lon, num(c[2]) if len(c) > 2 else None)
+        s["time"] = iso(datetime.fromisoformat(p["date"]))
+        s.update(t=num(p.get("LT")), rh=num(p.get("RH")), td=num(p.get("TD")), ws=num(p.get("WG")),
+                 wg=num(p.get("WG_BOE")), wd=num(p.get("WR")), pst=num(p.get("LD")),
+                 snow=num(p.get("HS")), rad=num(p.get("GS_O")))
+        out.append(s)
+    return out
+
+
+HR_DIR = {"N": 0, "NE": 45, "E": 90, "SE": 135, "S": 180, "SW": 225, "W": 270, "NW": 315,
+          "NNE": 22, "ENE": 67, "ESE": 112, "SSE": 157, "SSW": 202, "WSW": 247, "WNW": 292, "NNW": 337}
+
+
+def src_croazia():
+    """DHMZ: osservazioni orarie delle stazioni croate (Istria, Quarnero, Lika)."""
+    root = ET.fromstring(http_get("https://vrijeme.hr/hrvatska_n.xml"))
+    dt = eu_local_to_utc(datetime.strptime(root.findtext("DatumTermin/Datum").strip() + " "
+                                           + root.findtext("DatumTermin/Termin").strip(), "%d.%m.%Y %H"))
+    out = []
+    for g in root.iter("Grad"):
+        lat, lon = num((g.findtext("Lat") or "").strip()), num((g.findtext("Lon") or "").strip())
+        if not in_bbox(lat, lon):
+            continue
+        d = lambda k: (g.findtext("Podatci/" + k) or "").strip()
+        s = station("hr", g.findtext("GradIme").strip(), g.findtext("GradIme").strip(), lat, lon)
+        s["time"] = iso(dt)
+        ws = num(d("VjetarBrzina"))
+        s.update(t=num(d("Temp")), rh=num(d("Vlaga")), p=num(d("Tlak")), ws=kmh(ws),
+                 wd=HR_DIR.get(d("VjetarSmjer").upper()))
+        out.append(s)
+    return out
+
+
+def src_vento():
+    """OpenWindMap (Pioupiou): anemometri dei volatori, utili per il vento in montagna."""
+    d = get_json("https://api.pioupiou.fr/v1/live/all")
+    fresh = datetime.now(UTC) - timedelta(hours=2)
+    out = []
+    for x in d.get("data", []):
+        loc, m = x.get("location") or {}, x.get("measurements") or {}
+        lat, lon = num(loc.get("latitude")), num(loc.get("longitude"))
+        if (x.get("status") or {}).get("state") != "on" or not in_bbox(lat, lon) or not m.get("date"):
+            continue
+        t = utc_from_isoz(m["date"])
+        if t < fresh:
+            continue
+        name = ((x.get("meta") or {}).get("name") or "").strip() or f"Anemometro {x['id']}"
+        s = station("wind", x["id"], name, lat, lon)
+        s["time"] = iso(t)
+        s.update(ws=num(m.get("wind_speed_avg")), wg=num(m.get("wind_speed_max")), wd=num(m.get("wind_heading")))
+        out.append(s)
+    return out
+
+
+def src_amatoriali():
+    """Sensor.Community: sensori amatoriali all'aperto (temperatura, umidita', pressione).
+    Sono strumenti economici: vengono confrontati con le stazioni ufficiali vicine (vedi qc_amatoriali)."""
+    rows = get_json("https://data.sensor.community/static/v2/data.temp.min.json", timeout=90)
+    locs = {}
+    for r in rows:
+        loc = r.get("location") or {}
+        if str(loc.get("indoor")) not in ("0", "False", "false"):
+            continue
+        lat, lon = num(loc.get("latitude")), num(loc.get("longitude"))
+        if not in_bbox(lat, lon) or not r.get("timestamp"):
+            continue
+        vals = {v.get("value_type"): num(v.get("value")) for v in r.get("sensordatavalues") or []}
+        typ = ((r.get("sensor") or {}).get("sensor_type") or {}).get("name", "")
+        lid = loc.get("id")
+        s = locs.get(lid)
+        if not s:
+            s = locs[lid] = station("sc", lid, f"Sensore amatoriale {lid}", lat, lon, num(loc.get("altitude")))
+        t = iso(datetime.strptime(r["timestamp"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC))
+        s["time"] = max(s["time"] or t, t)
+        if vals.get("temperature") is not None and s.get("t") is None:
+            s["t"] = vals["temperature"]
+        h = vals.get("humidity")
+        if h is not None and s.get("rh") is None and 3 < h < 99.5:  # i DHT22 bagnati restano fissi a 99,9
+            s["rh"] = h
+        if vals.get("pressure_at_sealevel") and typ.startswith("BM"):
+            s["p"] = vals["pressure_at_sealevel"] / 100
+    return list(locs.values())
+
+
+def nearby(index, lat, lon, km):
+    """Stazioni dell'indice entro km (indice a celle di 0.25 gradi)."""
+    cells = int(km / 20) + 1
+    ci, cj = int(lon / 0.25), int(lat / 0.25)
+    kx = math.cos(math.radians(lat)) * 111.2
+    for i in range(ci - cells, ci + cells + 1):
+        for j in range(cj - cells, cj + cells + 1):
+            for s in index.get((i, j), ()):
+                d = math.hypot((s["lon"] - lon) * kx, (s["lat"] - lat) * 111.2)
+                if d <= km:
+                    yield d, s
+
+
+def make_index(stations):
+    idx = {}
+    for s in stations:
+        idx.setdefault((int(s["lon"] / 0.25), int(s["lat"] / 0.25)), []).append(s)
+    return idx
+
+
+def median(v):
+    v = sorted(v)
+    n = len(v)
+    return None if not n else (v[n // 2] if n % 2 else (v[n // 2 - 1] + v[n // 2]) / 2)
+
+
+def qc_amatoriali(official, amateur):
+    """Controllo di qualita' dei sensori amatoriali: confronto con le stazioni ufficiali
+    (temperatura riportata alla stessa quota) e con gli altri sensori vicini."""
+    oidx = make_index([s for s in official if s.get("t") is not None or s.get("p") is not None])
+    aidx = make_index([s for s in amateur if s.get("t") is not None])
+    keep = []
+    for s in amateur:
+        alt = s.get("alt") or 0
+        if s.get("t") is not None:
+            ref = [o["t"] + 0.0065 * ((o.get("alt") or alt) - alt)
+                   for _, o in nearby(oidx, s["lat"], s["lon"], 30) if o.get("t") is not None]
+            if len(ref) < 2:  # poche stazioni ufficiali: confronto con gli altri sensori
+                ref = [a["t"] + 0.0065 * ((a.get("alt") or alt) - alt)
+                       for d, a in nearby(aidx, s["lat"], s["lon"], 15) if a is not s and a.get("t") is not None]
+                lim = 4.0 if len(ref) >= 3 else None
+            else:
+                lim = 3.0
+            m = median(ref)
+            if lim is None or abs(s["t"] - m) > lim:
+                s["t"] = None
+                s.pop("td", None)
+            if s.get("rh") is not None and s["t"] is None:
+                s["rh"] = None
+        if s.get("p") is not None:
+            ref = [o["p"] for _, o in nearby(oidx, s["lat"], s["lon"], 60) if o.get("p") is not None]
+            if len(ref) < 2 or abs(s["p"] - median(ref)) > 2.5:
+                s["p"] = None
+        if any(s.get(k) is not None for k in ("t", "rh", "p")):
+            keep.append(s)
+    return keep
+
+
+def dedupe(stations):
+    """Toglie le stazioni di una rete secondaria che coincidono con una gia' presente (entro 250 m)."""
+    order = {sid: i for i, (sid, _, _) in enumerate(SOURCES)}
+    stations = sorted(stations, key=lambda s: order.get(s["src"], 99))
+    idx, out = {}, []
+    for s in stations:
+        if s["src"] in SECONDARY and any(o["src"] != s["src"] for _, o in nearby(idx, s["lat"], s["lon"], 0.25)):
+            continue
+        idx.setdefault((int(s["lon"] / 0.25), int(s["lat"] / 0.25)), []).append(s)
+        out.append(s)
+    return out
+
+
+SECONDARY = {"slf", "tir", "hr", "wind", "sc"}
+
 SOURCES = [
     ("lom", "ARPA Lombardia", src_lombardia),
     ("ven", "ARPA Veneto", src_veneto),
@@ -475,6 +685,11 @@ SOURCES = [
     ("at", "GeoSphere Austria", src_geosphere),
     ("si", "ARSO Slovenia", src_arso),
     ("metar", "Aeroporti (METAR)", src_metar),
+    ("slf", "SLF Svizzera (stazioni neve IMIS)", src_slf),
+    ("tir", "Servizio valanghe Tirolo", src_tirol),
+    ("hr", "DHMZ Croazia", src_croazia),
+    ("wind", "OpenWindMap (anemometri)", src_vento),
+    ("sc", "Sensor.Community (amatoriali, verificati)", src_amatoriali),
 ]
 
 FIELDS = ("t", "td", "rh", "p", "pst", "ws", "wg", "wd", "pr", "prm", "rad", "sun", "snow", "cloud",
@@ -546,8 +761,16 @@ class Stations:
 
     def _build(self):
         with self.lock:
-            stations = [s for st in self.state.values() for s in st["data"]]
+            stations = [s for st in self.state.values() if st["id"] != "sc" for s in st["data"]]
+            amateur = [dict(s) for s in self.state["sc"]["data"]]
             sources = [{k: st[k] for k in ("id", "name", "count", "ok", "error")} for st in self.state.values()]
+        amateur = [{k: v for k, v in s.items() if v is not None} for s in qc_amatoriali(stations, amateur)]
+        stations = dedupe(stations + amateur)
+        counts = {}
+        for s in stations:
+            counts[s["src"]] = counts.get(s["src"], 0) + 1
+        for src in sources:
+            src["count"] = counts.get(src["id"], 0)
         body = json.dumps({"updated": iso(datetime.now(UTC)), "sources": sources, "stations": stations},
                           ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         self.payload = gzip.compress(body, 5)
@@ -871,10 +1094,13 @@ class Handler(SimpleHTTPRequestHandler):
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "test":  # prova le sorgenti senza avviare il server
         STATIONS.refresh()
+        final = json.loads(gzip.decompress(STATIONS.payload))
+        kept = {s["id"]: s["count"] for s in final["sources"]}
         for st in STATIONS.state.values():
-            print(f"{st['id']:6} {st['count']:5}  {st['error'] or 'ok'}")
+            print(f"{st['id']:6} scaricate {len(st['data']):5}  pubblicate {kept.get(st['id'], 0):5}  {st['error'] or 'ok'}")
             if st["data"]:
                 print("       es:", json.dumps(st["data"][len(st["data"]) // 2], ensure_ascii=False))
+        print("Totale stazioni pubblicate:", len(final["stations"]))
         return
     if len(sys.argv) > 1 and sys.argv[1] == "dem":  # rigenera il file del rilievo
         return build_dem()

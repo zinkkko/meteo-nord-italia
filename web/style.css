@@ -220,6 +220,38 @@ input[type=range]::-moz-range-thumb { width: 24px; height: 24px; border: 0; bord
 .td { font-size: 12px; color: var(--text2); margin-top: 2px; line-height: 1.4; }
 .ta { font-size: 12px; font-weight: 600; color: var(--orange); margin-top: 2px; } .tr.l2 .ta { color: var(--red); }
 
+/* ---------- tramonto e alba reali ---------- */
+.sun-open { width: 100%; height: 40px; margin-top: 8px; border-radius: 12px; background: var(--tile); color: var(--accent); font-size: 14px; font-weight: 600; }
+.sun-ctl { display: flex; gap: 8px; margin-top: 12px; align-items: center; }
+.seg { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 3px; padding: 3px; border-radius: 12px; background: var(--tile); }
+.seg button { height: 32px; border-radius: 9px; font-size: 13.5px; font-weight: 600; color: var(--text2); }
+.seg button.on { background: var(--glass-strong); color: var(--text); box-shadow: 0 1px 4px rgba(0,0,0,.18); }
+.sun-date { display: flex; align-items: center; height: 38px; border-radius: 12px; background: var(--tile); }
+.sun-date button { width: 30px; height: 38px; font-size: 20px; font-weight: 600; color: var(--accent); }
+.sun-date span { min-width: 62px; text-align: center; font-size: 13.5px; font-weight: 600; cursor: pointer; }
+.sun-gps { width: 100%; height: 36px; margin-top: 8px; border-radius: 12px; background: var(--tile); color: var(--text2); font-size: 13px; font-weight: 600; }
+.sun-gps.on { background: rgba(0, 122, 255, .14); color: var(--accent); }
+.sun-hero { margin-top: 14px; min-height: 64px; }
+.sh-big { font-size: 34px; font-weight: 700; letter-spacing: -.03em; line-height: 1.1; }
+.sh-sub { font-size: 14px; color: var(--text2); margin-top: 4px; line-height: 1.4; }
+.sh-sub b { color: var(--text); }
+.spinner.sm { display: inline-block; width: 22px; height: 22px; vertical-align: middle; }
+.sun-pano { margin-top: 12px; }
+.sun-pano canvas { display: block; width: 100%; height: 190px; border-radius: 14px; }
+.sp-cap { font-size: 11px; color: var(--text3); margin-top: 4px; }
+.sun-bar { margin: 12px 0 30px; }
+.sb-track { position: relative; height: 12px; border-radius: 6px; background: var(--tile); }
+.sb-track i { position: absolute; top: 0; bottom: 0; }
+.sb-track i:first-child { border-radius: 6px 0 0 6px; } .sb-track i:nth-child(4) { border-radius: 0 6px 6px 0; }
+.ph-day { background: #ffd60a; } .ph-gold { background: #ff9f0a; } .ph-blue { background: #5e5ce6; } .ph-night { background: #1c2340; }
+.ph-shade { background: repeating-linear-gradient(135deg, rgba(40,48,66,.85) 0 4px, rgba(40,48,66,.35) 4px 8px) !important; }
+.sb-track b, .sb-track em { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--text); border-radius: 1px; }
+.sb-track em { background: var(--red); width: 3px; margin-left: -1.5px; top: -5px; bottom: -5px; }
+.sb-track b span, .sb-track em span { position: absolute; top: 19px; left: 50%; transform: translateX(-50%); font-size: 10.5px; font-weight: 600; font-style: normal; color: var(--text2); white-space: nowrap; text-align: center; line-height: 1.15; }
+.sb-track em span { top: -17px; color: var(--red); }
+.sb-key { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 11px; color: var(--text2); margin-top: -4px; }
+.sb-key i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 4px; vertical-align: -1px; }
+
 .loading { position: absolute; inset: 0; display: grid; place-items: center; z-index: 20; pointer-events: none; transition: opacity .4s; }
 .loading.done { opacity: 0; }
 .loading-card { display: flex; align-items: center; gap: 12px; padding: 14px 20px; font-size: 14px; font-weight: 500; }
