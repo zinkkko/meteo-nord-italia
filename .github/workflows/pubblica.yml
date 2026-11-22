@@ -38,8 +38,27 @@ jobs:
         run: |
           mkdir -p web/data
           curl -fsSL --max-time 60 "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/data/grid.json" -o web/data/grid.json || rm -f web/data/grid.json
+      # Netatmo cambia il refresh token a ogni rinnovo: l'ultimo (cifrato con il client secret)
+      # passa da un'esecuzione all'altra nella cache. Senza i secret NETATMO_* la rete e' saltata.
+      - name: Recupera la chiave Netatmo dell'esecuzione precedente
+        uses: actions/cache/restore@v4
+        with:
+          path: .netatmo
+          key: netatmo-${{ github.run_id }}
+          restore-keys: netatmo-
       - name: Scarica i dati
+        env:
+          NETATMO_CLIENT_ID: ${{ secrets.NETATMO_CLIENT_ID }}
+          NETATMO_CLIENT_SECRET: ${{ secrets.NETATMO_CLIENT_SECRET }}
+          NETATMO_REFRESH_TOKEN: ${{ secrets.NETATMO_REFRESH_TOKEN }}
         run: python server.py build
+      - name: Conserva la chiave Netatmo rinnovata
+        if: always() && hashFiles('.netatmo/token.bin') != ''
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: .netatmo
+          key: netatmo-${{ hashFiles('.netatmo/token.bin') }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: web

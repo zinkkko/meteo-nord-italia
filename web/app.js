@@ -257,7 +257,7 @@ function computeCorrections() {
   const tb = F.dem ? tempBase(ti) : null, T = f32('temperature_2m', ti), RH = f32('relative_humidity_2m', ti), P = f32('pressure_msl', ti);
   const res = { t: [], rh: [], p: [] };
   for (const s of fresh) {
-    const wt = s.src === 'sc' ? 0.35 : 1; // i sensori amatoriali contano meno delle stazioni ufficiali
+    const wt = s.src === 'sc' || s.src === 'nt' ? 0.35 : 1; // gli amatoriali contano meno delle stazioni ufficiali
     if (s.t != null) {
       const alt = s.alt != null ? s.alt : S.dem ? pointBil(S.dem.z, S.dem, s.lon, s.lat) : 0;
       const m = tb ? pointBil(tb.T0, g, s.lon, s.lat) + tb.L * alt : pointBil(T, g, s.lon, s.lat);
@@ -330,7 +330,7 @@ function updateStations() {
       feats.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [s.lon, s.lat] },
         properties: { id: s.id, label: l.id === 'temp' || l.id === 'dew' ? fmt(v, 1) + '°' : fmt(v, l.id === 'rain' ? 1 : 0) + (l.id === 'cloud' ? '%' : ''),
           color: colorCss(l, v, true), rot: ((s.wd ?? 0) + 180) % 360, hasDir: s.wd != null && (s.ws ?? 1) > 0.5,
-          pri: s.src === 'metar' ? 0 : s.src === 'sc' || s.src === 'wind' ? 2 : 1, sel: S.sel === s.id } });
+          pri: s.src === 'metar' ? 0 : s.src === 'sc' || s.src === 'nt' || s.src === 'wind' ? 2 : 1, sel: S.sel === s.id } });
     }
   }
   src.setData({ type: 'FeatureCollection', features: feats });
@@ -763,7 +763,7 @@ function renderSources() {
   $('sources').innerHTML = '<h4>Reti di misura</h4>' + S.sources.map((s) =>
     `<div class="row"><span class="dot ${s.ok === false ? 'bad' : ''}"></span>${esc(s.name)}<b>${s.count}</b></div>`).join('') +
     `<label><input type="checkbox" id="stShow" ${S.showSt ? 'checked' : ''}> Mostra le stazioni sulla mappa</label>` +
-    '<p id="updInfo"></p><p>I numeri con il pallino sono misure delle stazioni (solo su «Adesso»); i numeri senza pallino e lo sfondo colorato sono il modello, corretto attorno alle stazioni con le misure dell’ultima ora.</p><p>I sensori amatoriali sono confrontati con le stazioni ufficiali vicine (alla stessa quota): quelli troppo diversi vengono scartati e gli altri pesano un terzo nella correzione. Se due reti misurano nello stesso punto si tiene la stazione ufficiale.</p>';
+    '<p id="updInfo"></p><p>I numeri con il pallino sono misure delle stazioni (solo su «Adesso»); i numeri senza pallino e lo sfondo colorato sono il modello, corretto attorno alle stazioni con le misure dell’ultima ora.</p><p>Le stazioni amatoriali (Sensor.Community e Netatmo) sono confrontate con le stazioni ufficiali vicine (alla stessa quota): quelle troppo diverse vengono scartate e le altre pesano un terzo nella correzione. Di Netatmo si usano solo temperatura, umidità e pressione, al massimo una stazione ogni 2 km circa. Se due reti misurano nello stesso punto si tiene la stazione ufficiale.</p>';
   $('stShow').onchange = (e) => { S.showSt = e.target.checked; $('stToggle').classList.toggle('on', S.showSt); updateStations(); };
   showUpdated();
 }

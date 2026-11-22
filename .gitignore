@@ -4,3 +4,4 @@ __pycache__/
 web/data/stations.json
 web/data/grid.json
 icone-proposte/
+.netatmo/

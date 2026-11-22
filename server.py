@@ -8,6 +8,8 @@ Avvio:  python server.py   ->   http://localhost:8765
 """
 import csv
 import gzip
+import hashlib
+import hmac
 import io
 import json
 import math
@@ -16,6 +18,7 @@ import re
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -601,6 +604,157 @@ def src_amatoriali():
     return list(locs.values())
 
 
+# Netatmo: stazioni private che i proprietari condividono sulla Weathermap.  Servono una app su
+# dev.netatmo.com e tre variabili d'ambiente (NETATMO_CLIENT_ID, NETATMO_CLIENT_SECRET,
+# NETATMO_REFRESH_TOKEN); senza, la rete non viene usata.  Netatmo cambia il refresh token a ogni
+# rinnovo e invalida il vecchio: l'ultimo si tiene in .netatmo/token.bin, cifrato con il client
+# secret (su GitHub il file passa da un'esecuzione all'altra nella cache di Actions).
+NT_DIR = os.path.join(ROOT, ".netatmo")
+NT_FILE = os.path.join(NT_DIR, "token.bin")
+NT_COLS, NT_ROWS = 8, 5  # riquadri dell'area, una richiesta ciascuno (limite Netatmo: 500 all'ora)
+NT_CELL = 0.02  # al massimo una stazione Netatmo per cella di ~2 km
+NT_LOCK = threading.Lock()
+
+
+def http_req(url, data=None, headers=None, timeout=40):
+    """GET (o POST se ci sono dati di modulo) con risposta JSON; gli errori HTTP riportano il corpo."""
+    body = urllib.parse.urlencode(data).encode() if data is not None else None
+    req = urllib.request.Request(url, data=body, headers={"User-Agent": UA, **(headers or {})})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"HTTP {e.code} {e.read()[:150].decode('utf-8', 'replace')}") from None
+
+
+def _nt_key(secret):
+    return hashlib.sha256(b"meteo-nord-italia/netatmo|" + secret.encode()).digest()
+
+
+def _nt_xor(key, nonce, data):
+    """Cifratura a flusso con HMAC-SHA256 (solo libreria standard)."""
+    out = bytearray()
+    for i in range(0, len(data), 32):
+        ks = hmac.new(key, b"ks" + nonce + i.to_bytes(4, "big"), hashlib.sha256).digest()
+        out += bytes(a ^ b for a, b in zip(data[i:i + 32], ks))
+    return bytes(out)
+
+
+def nt_load(secret):
+    try:
+        with open(NT_FILE, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return {}
+    key, nonce, tag, body = _nt_key(secret), raw[:16], raw[16:48], raw[48:]
+    if not hmac.compare_digest(tag, hmac.new(key, b"tag" + nonce + body, hashlib.sha256).digest()):
+        return {}  # file rovinato o cifrato con un'altra app
+    return json.loads(_nt_xor(key, nonce, body))
+
+
+def nt_save(secret, tok):
+    key, nonce = _nt_key(secret), os.urandom(16)
+    body = _nt_xor(key, nonce, json.dumps(tok).encode())
+    os.makedirs(NT_DIR, exist_ok=True)
+    with open(NT_FILE + ".tmp", "wb") as f:
+        f.write(nonce + hmac.new(key, b"tag" + nonce + body, hashlib.sha256).digest() + body)
+    os.replace(NT_FILE + ".tmp", NT_FILE)
+
+
+def netatmo_token():
+    """Access token valido; lo rinnova (e salva il nuovo refresh token) quando sta per scadere."""
+    cid, sec = os.environ["NETATMO_CLIENT_ID"], os.environ["NETATMO_CLIENT_SECRET"]
+    seed = os.environ.get("NETATMO_REFRESH_TOKEN", "")
+    with NT_LOCK:
+        tok = nt_load(sec)
+        sh = hashlib.sha256(seed.encode()).hexdigest()[:16]
+        if seed and tok.get("seed") != sh:  # chiave nuova, generata dall'utente: si riparte da quella
+            tok = {"seed": sh, "refresh": seed}
+        if tok.get("access") and tok.get("exp", 0) > time.time() + 600:
+            return tok["access"]
+        if not tok.get("refresh"):
+            raise RuntimeError("manca NETATMO_REFRESH_TOKEN")
+        d = http_req("https://api.netatmo.com/oauth2/token", {
+            "grant_type": "refresh_token", "refresh_token": tok["refresh"], "client_id": cid, "client_secret": sec})
+        tok.update(access=d["access_token"], refresh=d.get("refresh_token") or tok["refresh"],
+                   exp=time.time() + int(d.get("expires_in") or 10800))
+        nt_save(sec, tok)
+        return tok["access"]
+
+
+def src_netatmo():
+    """Netatmo: si tengono temperatura, umidita' e pressione, controllate come i sensori amatoriali
+    (qc_amatoriali).  Pioggia e vento dei privati no: pluviometri e anemometri sono spesso mal posti."""
+    auth = {"Authorization": "Bearer " + netatmo_token()}
+    x0, y0, x1, y1 = BBOX
+    dx, dy = (x1 - x0) / NT_COLS, (y1 - y0) / NT_ROWS
+    boxes = [(x0 + i * dx, y0 + j * dy) for i in range(NT_COLS) for j in range(NT_ROWS)]
+
+    def one(b):
+        q = urllib.parse.urlencode({"lon_sw": f"{b[0]:.3f}", "lat_sw": f"{b[1]:.3f}", "lon_ne": f"{b[0] + dx:.3f}",
+                                    "lat_ne": f"{b[1] + dy:.3f}", "required_data": "temperature", "filter": "true"})
+        try:
+            return http_req("https://api.netatmo.com/api/getpublicdata?" + q, headers=auth).get("body") or []
+        except Exception as e:
+            return e
+
+    with ThreadPoolExecutor(4) as ex:
+        res = list(ex.map(one, boxes))
+    errs = [r for r in res if isinstance(r, Exception)]
+    if len(errs) == len(res):
+        raise errs[0]
+    old = time.time() - 2 * 3600
+    out = {}
+    for body in res:
+        for b in [] if isinstance(body, Exception) else body:
+            pl = b.get("place") or {}
+            loc = pl.get("location") or []
+            lon, lat = (num(loc[0]), num(loc[1])) if len(loc) == 2 else (None, None)
+            if not in_bbox(lat, lon):
+                continue
+            vals, last = {}, 0
+            for m in (b.get("measures") or {}).values():
+                rs, types = m.get("res") or {}, m.get("type") or []
+                if not rs or not types:
+                    continue
+                ts = max(rs, key=int)
+                if int(ts) < old:  # modulo che non trasmette piu'
+                    continue
+                for typ, v in zip(types if isinstance(types, list) else [types], rs[ts]):
+                    vals.setdefault(typ, num(v))
+                last = max(last, int(ts))
+            if vals.get("temperature") is None:
+                continue
+            sid = hashlib.sha1(str(b.get("_id")).encode()).hexdigest()[:10]  # non si pubblica il MAC
+            city = (pl.get("city") or "").strip()
+            s = station("nt", sid, f"Netatmo · {city}" if city else "Stazione Netatmo",
+                        round(lat, 3), round(lon, 3), num(pl.get("altitude")))
+            s["time"] = iso(datetime.fromtimestamp(last, UTC))
+            s.update(t=vals.get("temperature"), rh=vals.get("humidity"), p=vals.get("pressure"))
+            out[sid] = s  # una stazione sul bordo di due riquadri arriva due volte
+    per_box = [len(r) for r in res if not isinstance(r, Exception)]
+    print(f"  [nt] {len(boxes)} riquadri ({len(errs)} con errore), al massimo {max(per_box)} stazioni "
+          f"in un riquadro, {len(out)} stazioni diverse", flush=True)
+    return list(out.values())
+
+
+def thin(stations, cell=NT_CELL):
+    """Nelle citta' le stazioni Netatmo sono decine per chilometro quadrato: se ne tiene una per
+    cella di ~2 km, quella con la temperatura piu' vicina alla mediana della cella."""
+    groups, out = {}, []
+    for s in stations:
+        if s["src"] == "nt":
+            groups.setdefault((int(s["lon"] // cell), int(s["lat"] // cell)), []).append(s)
+        else:
+            out.append(s)
+    for g in groups.values():
+        m = median([s["t"] for s in g if s.get("t") is not None])
+        out.append(min(g, key=lambda s: (s.get("t") is None or m is None,
+                                         abs(s["t"] - m) if s.get("t") is not None and m is not None else 0,
+                                         -len(s))))
+    return out
+
+
 def nearby(index, lat, lon, km):
     """Stazioni dell'indice entro km (indice a celle di 0.25 gradi)."""
     cells = int(km / 20) + 1
@@ -672,7 +826,8 @@ def dedupe(stations):
     return out
 
 
-SECONDARY = {"slf", "tir", "hr", "wind", "sc"}
+SECONDARY = {"slf", "tir", "hr", "wind", "nt", "sc"}
+AMATEUR = {"nt", "sc"}  # reti amatoriali: passano dal controllo qc_amatoriali
 
 SOURCES = [
     ("lom", "ARPA Lombardia", src_lombardia),
@@ -691,6 +846,8 @@ SOURCES = [
     ("wind", "OpenWindMap (anemometri)", src_vento),
     ("sc", "Sensor.Community (amatoriali, verificati)", src_amatoriali),
 ]
+if os.environ.get("NETATMO_CLIENT_ID") and os.environ.get("NETATMO_CLIENT_SECRET"):
+    SOURCES.insert(len(SOURCES) - 1, ("nt", "Netatmo (amatoriali, verificati)", src_netatmo))
 
 FIELDS = ("t", "td", "rh", "p", "pst", "ws", "wg", "wd", "pr", "prm", "rad", "sun", "snow", "cloud",
           "cbase", "vis")
@@ -761,10 +918,10 @@ class Stations:
 
     def _build(self):
         with self.lock:
-            stations = [s for st in self.state.values() if st["id"] != "sc" for s in st["data"]]
-            amateur = [dict(s) for s in self.state["sc"]["data"]]
+            stations = [s for st in self.state.values() if st["id"] not in AMATEUR for s in st["data"]]
+            amateur = [dict(s) for st in self.state.values() if st["id"] in AMATEUR for s in st["data"]]
             sources = [{k: st[k] for k in ("id", "name", "count", "ok", "error")} for st in self.state.values()]
-        amateur = [{k: v for k, v in s.items() if v is not None} for s in qc_amatoriali(stations, amateur)]
+        amateur = thin([{k: v for k, v in s.items() if v is not None} for s in qc_amatoriali(stations, amateur)])
         stations = dedupe(stations + amateur)
         counts = {}
         for s in stations:
